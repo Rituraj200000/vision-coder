@@ -64,7 +64,7 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target?.result as string);
-        setAnalysis({ isAnalyzing: false, isGenerating: false, boxes: [], generatedCode: '', error: null });
+        setAnalysis({ ...analysis, boxes: [], generatedCode: '', error: null });
         setManualPoints([]);
       };
       reader.readAsDataURL(file);
@@ -77,12 +77,11 @@ export default function App() {
     setAnalysis(prev => ({ ...prev, isAnalyzing: true, error: null }));
     try {
       const base64Data = image.split(',')[1];
-      const prompt = `Act as a precision UI parser. Analyze this screenshot carefully.
-      1. Identify ALL visual components (buttons, nav items, text blocks, images, forms, inputs).
-      2. For each, determine its bounding box in [y1, x1, y2, x2] normalized coordinates (0-1000).
-      3. Return ONLY a JSON array of objects.
-      4. Even if the image is small, blurry, or low resolution, perform your best estimation of the layout.
-      5. Output format: [{"y1": number, "x1": number, "y2": number, "x2": number, "label": string}]`;
+      const prompt = `Analyze this UI screenshot and identify all elements. 
+      For each element, find its bounding box coordinates in [y_min, x_min, y_max, x_max] format (normalized 0-1000).
+      Return a JSON array of objects with "y1", "x1", "y2", "x2", and "label" properties. 
+      Include buttons, inputs, headers, text blocks, images, icons, and containers.
+      Make it exhaustive.`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-3-flash-preview",
@@ -110,39 +109,15 @@ export default function App() {
         }
       });
 
-      let boxes = [];
-      
-      try {
-        const text = response.text;
-        boxes = JSON.parse(text || '[]').map((b: any, index: number) => ({
-          y1: Number(b.y1),
-          x1: Number(b.x1),
-          y2: Number(b.y2),
-          x2: Number(b.x2),
-          label: String(b.label || 'element'),
-          id: `box-${index}-${Date.now()}`
-        }));
-      } catch (parseErr) {
-        console.error("Parse Error:", parseErr);
-        throw new Error("Could not parse system scan results. Please try scanning again.");
-      }
+      const boxes = JSON.parse(response.text || '[]').map((b: any, index: number) => ({
+        ...b,
+        id: `box-${index}`
+      }));
 
-      setAnalysis(prev => ({ 
-        ...prev, 
-        isAnalyzing: false, 
-        boxes: boxes.length > 0 ? boxes : prev.boxes 
-      }));
-      
+      setAnalysis(prev => ({ ...prev, isAnalyzing: false, boxes }));
     } catch (err: any) {
-      console.error("Scan Error:", err);
-      setAnalysis(prev => ({ 
-        ...prev, 
-        isAnalyzing: false, 
-        error: `SYSTEM_SCAN_FAILURE: ${err.message || 'Unknown error'}` 
-      }));
-    } finally {
-      // Safety reset to prevent UI hanging
-      setAnalysis(prev => ({ ...prev, isAnalyzing: false }));
+      console.error(err);
+      setAnalysis(prev => ({ ...prev, isAnalyzing: false, error: 'Analysis failed. Please try again.' }));
     }
   };
 
@@ -152,9 +127,8 @@ export default function App() {
     setAnalysis(prev => ({ ...prev, isGenerating: true, error: null }));
     try {
       const base64Data = image.split(',')[1];
-      
       const pointsInfo = manualPoints.length > 0 
-        ? `CRITICAL USER OVERRIDE: The user has manually identified ${manualPoints.length} key elements at these normalized [x, y] coordinates: ${JSON.stringify(manualPoints)}. YOU MUST identify and code elements at these exact locations, even if your automated scan missed them. These are high-priority focus areas that need pixel-perfect implementation.`
+        ? `Additionally, focus on these specific coordinate points identified by the user: ${JSON.stringify(manualPoints)}.` 
         : '';
       
       const prompt = `Act as a master frontend engineer specialized in Elementor Custom HTML widgets. 
@@ -166,7 +140,7 @@ export default function App() {
       1. MUST be a single block of code (HTML + CSS + JS all together).
       2. TOP COMMENT BLOCK MUST INCLUDE:
          <!-- 
-         TITLE: [Identify Section Name from UI]
+         TITLE: [Section Name]
          ✅ PIXEL PERFECT REPLICA
          ✅ FULLY RESPONSIVE (MOBILE + DESKTOP)
          ✅ SELF-CONTAINED CSS & JS
@@ -176,7 +150,7 @@ export default function App() {
          -->
       
       TECHNICAL REQUIREMENTS:
-      - CSS: Use a <style> tag. Handle mobile/desktop with media queries. Use 'Montserrat' (import from Google Fonts). Match colors, spacing, and hover effects exactly.
+      - CSS: Use a <style> tag. Handle mobile/desktop with media queries. Use 'Montserrat' or similar high-quality fonts. Match colors, spacing, and hover effects exactly.
       - JS: Use a <script> tag at the bottom for any interactions.
       - ICONS: Always include Font Awesome CDN: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
       - COMMENTS: Add helpful comments throughout the code explaining the structure for developers.
@@ -192,49 +166,110 @@ export default function App() {
         }
       });
 
-      const rawText = response.text || '';
-      const cleanedCode = rawText.replace(/```html|```/g, '').trim();
+      const code = response.text || '';
+      // Extract code if wrapped in markdown
+      const cleanedCode = code.includes('<!DOCTYPE html>') || code.includes('<html>')
+        ? code.replace(/```html|```/g, '').trim()
+        : code;
 
       setAnalysis(prev => ({ ...prev, isGenerating: false, generatedCode: cleanedCode }));
       setPreviewMode('code');
     } catch (err: any) {
       console.error(err);
       setAnalysis(prev => ({ ...prev, isGenerating: false, error: 'Code generation failed.' }));
-    } finally {
-      setAnalysis(prev => ({ ...prev, isGenerating: false }));
     }
   };
 
   const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!imageContainerRef.current) return;
     
-    // Improved coordinate mapping: find the actual image child
-    const img = imageContainerRef.current.querySelector('img');
-    if (!img) return;
-
-    const rect = img.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-
+    const rect = imageContainerRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 1000;
     const y = ((e.clientY - rect.top) / rect.height) * 1000;
 
-    // Boundary check to ensure points stick to image
-    if (x >= 0 && x <= 1000 && y >= 0 && y <= 1000) {
-      setManualPoints(prev => [...prev, { x, y }]);
-    }
-  };
-
-  const removePoint = (idx: number) => {
-    setManualPoints(prev => prev.filter((_, i) => i !== idx));
+    setManualPoints([...manualPoints, { x, y }]);
   };
 
   const clearPoints = () => setManualPoints([]);
 
   const copyCode = () => {
-    if (!analysis.generatedCode) return;
     navigator.clipboard.writeText(analysis.generatedCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Black and White "Heat Map" Visualizer
+  const renderHeatmap = () => {
+    if (!analysis.boxes.length && !manualPoints.length) return null;
+
+    return (
+      <svg 
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        viewBox="0 0 1000 1000"
+        preserveAspectRatio="none"
+      >
+        <defs>
+          <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+            <path d="M 20 0 L 0 0 0 20" fill="none" stroke="black" strokeWidth="0.5" strokeOpacity="0.1" />
+          </pattern>
+        </defs>
+        <rect width="1000" height="1000" fill="url(#grid)" />
+        
+        {analysis.boxes.map((box) => (
+          <g key={box.id}>
+            <rect
+              x={box.x1}
+              y={box.y1}
+              width={box.x2 - box.x1}
+              height={box.y2 - box.y1}
+              fill="rgba(0,0,0,0.05)"
+              stroke="black"
+              strokeWidth="2"
+              strokeDasharray="4 2"
+            />
+            <text
+              x={box.x1 + 4}
+              y={box.y1 + 12}
+              fontSize="10"
+              fontFamily="monospace"
+              fill="white"
+              className="px-1"
+            >
+              <tspan sx={{ background: 'black' }}>{box.label}</tspan>
+            </text>
+            <rect
+              x={box.x1}
+              y={box.y1}
+              width={box.label.length * 6 + 10}
+              height="16"
+              fill="black"
+            />
+            <text
+              x={box.x1 + 5}
+              y={box.y1 + 12}
+              fontSize="9"
+              fill="white"
+              fontFamily="monospace"
+            >
+              {box.label.toUpperCase()}
+            </text>
+          </g>
+        ))}
+
+        {manualPoints.map((p, i) => (
+          <circle
+            key={i}
+            cx={p.x}
+            cy={p.y}
+            r="12"
+            fill="red"
+            stroke="white"
+            strokeWidth="3"
+            className="animate-pulse"
+          />
+        ))}
+      </svg>
+    );
   };
 
   return (
@@ -368,62 +403,53 @@ export default function App() {
                            </defs>
                            <rect width="1000" height="1000" fill="url(#technicalGrid)" />
 
-                           {analysis.boxes.map((box) => {
-                             const x1 = Number(box.x1) || 0;
-                             const y1 = Number(box.y1) || 0;
-                             const x2 = Number(box.x2) || 0;
-                             const y2 = Number(box.y2) || 0;
-                             const width = Math.max(0, x2 - x1);
-                             const height = Math.max(0, y2 - y1);
-                             
-                             return (
-                               <g key={box.id}>
-                                 {/* Deep Wireframe Rect */}
-                                 <rect
-                                   x={x1}
-                                   y={y1}
-                                   width={width}
-                                   height={height}
-                                   fill="rgba(255,255,255,0.03)"
-                                   stroke="white"
-                                   strokeWidth="1.5"
-                                   strokeDasharray="4 2"
-                                   className="opacity-80"
-                                 />
-                                 
-                                 {/* Dimension Labels */}
-                                 <text
-                                   x={x1 + 2}
-                                   y={y1 - 4}
-                                   fontSize="7"
-                                   fill="white"
-                                   opacity="0.4"
-                                   fontFamily="monospace"
-                                 >
-                                   {Math.round(width)}x{Math.round(height)}
-                                 </text>
-  
-                                 {/* Label Badge */}
-                                 <rect
-                                   x={x1}
-                                   y={y1}
-                                   width={(box.label?.length || 0) * 6 + 10}
-                                   height="14"
-                                   fill="white"
-                                 />
-                                 <text
-                                   x={x1 + 5}
-                                   y={y1 + 10}
-                                   fontSize="9"
-                                   fill="black"
-                                   fontWeight="900"
-                                   fontFamily="monospace"
-                                 >
-                                   {(box.label || '').toUpperCase()}
-                                 </text>
-                               </g>
-                             );
-                           })}
+                           {analysis.boxes.map((box) => (
+                             <g key={box.id}>
+                               {/* Deep Wireframe Rect */}
+                               <rect
+                                 x={box.x1}
+                                 y={box.y1}
+                                 width={box.x2 - box.x1}
+                                 height={box.y2 - box.y1}
+                                 fill="rgba(255,255,255,0.03)"
+                                 stroke="white"
+                                 strokeWidth="1.5"
+                                 strokeDasharray="4 2"
+                                 className="opacity-80"
+                               />
+                               
+                               {/* Dimension Labels */}
+                               <text
+                                 x={box.x1 + 2}
+                                 y={box.y1 - 4}
+                                 fontSize="7"
+                                 fill="white"
+                                 opacity="0.4"
+                                 fontFamily="monospace"
+                               >
+                                 {Math.round(box.x2 - box.x1)}x{Math.round(box.y2 - box.y1)}
+                               </text>
+
+                               {/* Label Badge */}
+                               <rect
+                                 x={box.x1}
+                                 y={box.y1}
+                                 width={box.label.length * 6 + 10}
+                                 height="14"
+                                 fill="white"
+                               />
+                               <text
+                                 x={box.x1 + 5}
+                                 y={box.y1 + 10}
+                                 fontSize="9"
+                                 fill="black"
+                                 fontWeight="900"
+                                 fontFamily="monospace"
+                               >
+                                 {box.label.toUpperCase()}
+                               </text>
+                             </g>
+                           ))}
                    
                            {manualPoints.map((p, i) => (
                              <g key={i}>
@@ -465,20 +491,9 @@ export default function App() {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="w-full h-full bg-[#050505] relative group/code"
+                        className="w-full h-full bg-[#050505] p-8 font-mono text-xs overflow-auto text-white/80 leading-relaxed border border-white/10"
                       >
-                         <div className="absolute top-4 right-4 z-50">
-                           <button 
-                            onClick={copyCode}
-                            className="bg-white text-black px-4 py-2 text-[10px] font-black uppercase tracking-widest flex items-center gap-2 hover:bg-green-500 transition-colors shadow-2xl"
-                           >
-                             {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                             {copied ? 'COPIED_T_O_BUFFER' : 'COPY_ALL_CODE'}
-                           </button>
-                         </div>
-                         <div className="p-8 font-mono text-xs overflow-auto h-full text-white/80 leading-relaxed border border-white/10">
-                           <pre className="whitespace-pre-wrap">{analysis.generatedCode}</pre>
-                         </div>
+                        <pre className="whitespace-pre-wrap">{analysis.generatedCode}</pre>
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -527,26 +542,6 @@ export default function App() {
               </div>
               
               <div className="flex-1 overflow-auto p-6 space-y-8">
-                {/* focus point list if any */}
-                {manualPoints.length > 0 && (
-                  <div>
-                    <p className="text-[9px] opacity-40 mb-4 uppercase tracking-[0.2em]">Active Focus Points</p>
-                    <div className="flex flex-wrap gap-2">
-                      {manualPoints.map((p, idx) => (
-                        <div key={idx} className="flex items-center gap-2 bg-white/5 border border-white/20 pl-2 pr-1 py-1">
-                          <span className="text-[8px] font-bold text-white/60">PT_{idx+1}</span>
-                          <button 
-                            onClick={() => removePoint(idx)}
-                            className="p-1 hover:text-red-500 transition-colors"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
                 {/* Statistics Box */}
                 <div className="grid grid-cols-2 gap-[1px] bg-white/20 border border-white/20 overflow-hidden">
                   <div className="p-4 bg-black">
