@@ -84,7 +84,7 @@ export default function App() {
       4. Even if the image is small, blurry, or low resolution, perform your best estimation of the layout.
       5. Output format: [{"y1": number, "x1": number, "y2": number, "x2": number, "label": string}]`;
 
-      const result = await genAI.models.generateContent({
+      const response = await genAI.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: {
           parts: [
@@ -110,11 +110,10 @@ export default function App() {
         }
       });
 
-      const response = result.response;
       let boxes = [];
       
       try {
-        const text = response.text();
+        const text = response.text;
         boxes = JSON.parse(text || '[]').map((b: any, index: number) => ({
           y1: Number(b.y1),
           x1: Number(b.x1),
@@ -214,6 +213,8 @@ export default function App() {
     if (!img) return;
 
     const rect = img.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
     const x = ((e.clientX - rect.left) / rect.width) * 1000;
     const y = ((e.clientY - rect.top) / rect.height) * 1000;
 
